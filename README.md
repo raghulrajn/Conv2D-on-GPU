@@ -8,10 +8,11 @@ Implemented 4D initialisation of tensor
  - Tensor-Tensor addition, Subtraction, Multiplication, Division
  - Tensor-Scalar addition, Subtraction, Multiplication, Division
 
-### Installation of eigen library for matrix operations
+### Installation of required libraries
 
 ```console
-sudo apt-get install libeigen3-dev
+sudo apt-get install -y libeigen3-dev
+sudo apt-get install -y libopencv-dev
 ```
 
 ### To read [pre-trained kernels](https://github.com/milesial/Pytorch-UNet)
