@@ -56,6 +56,9 @@ public:
 
     // Function to get a block (H, W) from given (r, c)
     Eigen::Tensor<float, 2> block(int n, int c, int r, int col, int height, int width);
+
+    static Tensor4D fromImage(const std::string& imagePath);
+    void saveAsImage(const std::string& filePath);
 };
 
 #endif // TENSOR4D_H
