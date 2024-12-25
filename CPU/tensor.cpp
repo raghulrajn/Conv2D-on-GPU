@@ -2,27 +2,33 @@
 #include <unsupported/Eigen/CXX11/Tensor>
 
 class Tensor4D {
-    private:
+
+public:
     Eigen::Tensor<float, 4> tensor;
     int n; // dimensions (batch size)
     int c; // channels
     int h; // height
     int w; // width
 
-public:
-
+    //4D Tensor Initialization(N,C,H,W)
     Tensor4D(int N, int C, int H, int W)
         : n(N), c(C), h(H), w(W), tensor(N, C, H, W) {
         tensor.setRandom();
     }
 
+    //3D Tensor Initialization(1,C,H,W)
     Tensor4D(int C, int H, int W) : Tensor4D(1, C, H, W) {}
 
+    //2D Tensor Initialization(1,1,H,W)
     Tensor4D(int H, int W) : Tensor4D(1, 1, H, W) {}
 
     // Accessor for getting a matrix of shape (H, W)
     Eigen::Tensor<float, 2> get_matrix(int n, int c) {
         return tensor.chip(n, 0).chip(c, 0);
+    }
+
+    float operator()(int i, int j,int k, int l) {
+        return tensor(i,j,k,l);
     }
         // Padding function
     Tensor4D pad(int padH, int padW) {
@@ -55,10 +61,19 @@ public:
         w = tensor.dimension(3);
     }
 
+    void addBias(Tensor4D& bias) {
+        // Check if the bias tensor has the correct shape (1, c, 1, 1)
+        if (bias.n != 1 || bias.c != c || bias.h != 1 || bias.w != 1) {
+            throw std::invalid_argument("Bias tensor must have shape (1, 1, 1, Len), where Len matches the number of channels.");
+        }
+
+        // Broadcast the bias to match the dimensions of the main tensor
+        Eigen::array<int, 4> broadcast_dims = {n, 1, h, w};
+        tensor = tensor + bias.tensor.broadcast(broadcast_dims);
+    }
     // Constructor for creating Tensor4D from existing Eigen::Tensor
     Tensor4D(int N, int C, int H, int W, Eigen::Tensor<float, 4> existing_tensor)
         : n(N), c(C), h(H), w(W), tensor(std::move(existing_tensor)) {}
-
 
     // Print shape of the tensor
     void print_shape() const {
@@ -194,6 +209,39 @@ public:
         return tensor.chip(n, 0).chip(c, 0).slice(Eigen::array<int, 2>({r, col}), Eigen::array<int, 2>({height, width}));
     }
 
+    // void batchNormalize(float epsilon = 1e-5) {
+    //     const int N = tensor.dimension(0); // Batch size
+    //     const int C = tensor.dimension(1); // Channels
+    //     const int H = tensor.dimension(2); // Height
+    //     const int W = tensor.dimension(3); // Width
+    //     Tensor4D batchNormed(N,C,H,W);
+
+    //     // Compute mean and variance along [N, H, W] for each channel
+    //     Eigen::Tensor<float, 1> mean(C);
+    //     Eigen::Tensor<float, 1> variance(C);
+    //     // Default gamma (scale) and beta (shift)
+    //     Eigen::Tensor<float, 1> gamma(C);
+    //     Eigen::Tensor<float, 1> beta(C);
+    //     gamma.setConstant(1.0); // Default gamma = 1
+    //     beta.setConstant(0.0);  // Default beta = 0
+
+    //     // Normalize and apply scale and shift
+    //     for (int n = 0; n < N; ++n) {
+    //         for (int c = 0; c < C; ++c) {
+    //             float gamma_c = gamma(c);
+    //             float beta_c = beta(c);
+    //             float mean_c = mean(c);
+    //             float var_c = variance(c);
+
+    //             auto slice = tensor.chip(c, 1).chip(n, 0); // Extract batch-channel slice
+    //             auto normalized = (slice - mean_c) / std::sqrt(var_c + epsilon);
+    //             auto scaled = normalized * gamma_c + beta_c;
+
+    //             batchNormed.tensor.chip(c, 1).chip(n, 0) = scaled; // Assign back
+    //         }
+    //     }
+    // }
+
 };
 
 int main() {
@@ -203,8 +251,6 @@ int main() {
     
     // Print shape of tensor
     tensor1.print_shape();
-
-    // Scalar operations
     tensor1.printTensor();
     Tensor4D tensor2 = tensor1 + 1.0f;
     tensor2.printTensor();

@@ -5,14 +5,13 @@
 #include <unsupported/Eigen/CXX11/Tensor>
 
 class Tensor4D {
-private:
+
+public:
     Eigen::Tensor<float, 4> tensor;
     int n; // dimensions (batch size)
     int c; // channels
     int h; // height
     int w; // width
-
-public:
     // Constructors
     Tensor4D(int N, int C, int H, int W);
     Tensor4D(int C, int H, int W);
@@ -25,6 +24,7 @@ public:
     // Padding functions
     Tensor4D pad(int padH, int padW);
     void addPadding(int padH, int padW);
+    void addBias(Tensor4D& bias);
 
     // Print shape of the tensor
     void print_shape() const;
