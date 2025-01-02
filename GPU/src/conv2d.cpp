@@ -23,6 +23,8 @@ class GPUInit {
 
 		cl::Kernel convKernel;
 		cl::Kernel meanKernel;
+		cl::Kernel varianceKernel;
+		cl::Kernel reluKernel;
 		
 		// Timing events
 		cl::Event copyToDeviceEvent;
@@ -60,6 +62,8 @@ class GPUInit {
 		// cl::Kernel meanKernel(program, "compute_mean");
 		try {
 			meanKernel = cl::Kernel(program, "compute_mean");
+			varianceKernel = cl::Kernel(program, "compute_variance");
+			reluKernel = cl::Kernel(program, "compute_relu");
 		} catch (OpenCL::Error &e) {
 			std::cerr << "Error creating kernel: " << e.what() << std::endl;
 			throw std::runtime_error("Failed to create kernel.");
@@ -126,7 +130,7 @@ class GPUInit {
             
             } 
 
-	void computeMean(std::vector<float> input, std::vector<float> mean, int N, int C, int H, int W){
+	std::vector<float> computeMean(std::vector<float> input, std::vector<float> mean, int N, int C, int H, int W){
 
 		cl::NDRange globalSize(N, H, W);    // Global size
 		// cl::NDRange localSize(N / C, 1, 1); // Adjust local size for reduction
@@ -137,20 +141,17 @@ class GPUInit {
 		cl::Buffer tensor_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * input.size(), input.data());
         cl::Buffer mean_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * mean.size(), mean.data());
 
-		// cl::NDRange globalSize(N, H, W); // Global size covers all spatial elements
-        cl::NDRange localSize(256);      // Adjust based on your device capabilities
-		// Set kernel arguments
-		
+		// Set kernel arguments		
 		meanKernel.setArg(0, tensor_buffer);
 		meanKernel.setArg(1, mean_buffer);
-		meanKernel.setArg(2, cl::Local(localMemSize)); // Local memory
-		meanKernel.setArg(3, N);
-		meanKernel.setArg(4, C);
-		meanKernel.setArg(5, H);
-		meanKernel.setArg(6, W);
+		// meanKernel.setArg(2, cl::Local(localMemSize)); // Local memory
+		meanKernel.setArg(2, N);
+		meanKernel.setArg(3, C);
+		meanKernel.setArg(4, H);
+		meanKernel.setArg(5, W);
 
 		// Launch the kernel
-		queue.enqueueNDRangeKernel(meanKernel,cl::NDRange(),cl::NDRange(N,H,W),cl::NullRange);
+		queue.enqueueNDRangeKernel(meanKernel,cl::NDRange(),cl::NDRange(C,1,1),cl::NDRange());
 
 		queue.enqueueReadBuffer(mean_buffer, CL_TRUE, 0, sizeof(float) * mean.size(), mean.data());
 
@@ -158,6 +159,54 @@ class GPUInit {
         for (int c = 0; c < C; ++c) {
             std::cout << "Channel " << c << ": " << mean[c] << std::endl;
         }
+		return mean;
+	}
+
+	std::vector<float> computeVariance(std::vector<float> input, std::vector<float> mean,std::vector<float> variance, int N, int C, int H, int W){
+		std::vector<float> _mean = computeMean(input, mean, N,C,H,W);
+		cl::NDRange globalSize(N, H, W);    // Global size
+		// cl::NDRange localSize(N / C, 1, 1); // Adjust local size for reduction
+
+		// Allocate local memory (size matches localSize[0])
+		size_t localMemSize = sizeof(float) * 256;
+
+		cl::Buffer tensor_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * input.size(), input.data());
+        cl::Buffer mean_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * _mean.size(), _mean.data());
+		cl::Buffer variance_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * variance.size(), variance.data());
+		// Set kernel arguments		
+		varianceKernel.setArg(0, tensor_buffer);
+		varianceKernel.setArg(1, mean_buffer);
+		varianceKernel.setArg(2, variance_buffer);
+		varianceKernel.setArg(3, N);
+		varianceKernel.setArg(4, C);
+		varianceKernel.setArg(5, H);
+		varianceKernel.setArg(6, W);
+
+		// Launch the kernel
+		queue.enqueueNDRangeKernel(varianceKernel,cl::NDRange(),cl::NDRange(C),cl::NDRange());
+
+		queue.enqueueReadBuffer(variance_buffer, CL_TRUE, 0, sizeof(float) * variance.size(), variance.data());
+
+		 std::cout << "Variance for each channel:" << std::endl;
+        for (int c = 0; c < C; ++c) {
+            std::cout << "Channel " << c << ": " << variance[c] << std::endl;
+        }
+		return variance;
+	}
+	
+	void computeRelu(std::vector<float> input, int N, int C, int H, int W){
+		
+		cl::NDRange globalSize(N*H*W);    // Global size
+		
+		cl::Buffer tensor_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * input.size(), input.data());
+       
+		reluKernel.setArg(0, tensor_buffer);
+		reluKernel.setArg(1, N*C*H*W);
+		
+		// Launch the kernel
+		queue.enqueueNDRangeKernel(reluKernel,cl::NDRange(),globalSize,cl::NDRange());
+
+		queue.enqueueReadBuffer(tensor_buffer, CL_TRUE, 0, sizeof(float) * input.size(), input.data());
 	}
 };
 
@@ -235,18 +284,23 @@ int main() {
     int H = 3; // Height
     int W = 3; // Width
 
-    // Example flattened 4D tensor with random values
+    //flattened 4D tensor with random values
     std::vector<float> tensor = {
-        1, 2, 3, 4, 5, 6, 7, 8, 9, // Example data for demonstration
-        1, 2, 3, 4, 5, 6, 7, 8, 9,
-        1, 2, 3, 4, 5, 6, 7, 8, 9
+        1, 2, -3, 4, 5, 6, 7, 8, 9, // Example data for demonstration
+        1, 2, 3, -4, 5, 6, 7, 8, 9,
+        1, 2, 3, 4, -5, 6, 7, 8, 9
 
     };
 
 	std::vector<float>mean(C, 0.0f);
+	std::vector<float>variance(C, 0.0f);
 
-	gpu.computeMean(tensor, mean, N, C, H, W);
-		
+	variance = gpu.computeVariance(tensor, mean,variance, N, C, H, W);
+	gpu.computeRelu(tensor,N,C,H,W);
+	for (int c = 0; c < tensor.size(); ++c) {
+            std::cout<< tensor[c] <<" ";
+			
+        }
         
     return 0;
 } 

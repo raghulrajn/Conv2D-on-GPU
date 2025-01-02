@@ -72,7 +72,7 @@ __kernel void conv2d(
     }
 }
 
-__kernel void relu(__global float* tensor, int total_size) {
+__kernel void compute_relu(__global float* tensor, int total_size) {
     int idx = get_global_id(0); // Get global thread ID
     if (idx < total_size) {
         tensor[idx] = fmax(0.0f, tensor[idx]); // Apply ReLU
@@ -80,7 +80,7 @@ __kernel void relu(__global float* tensor, int total_size) {
 }
 
 
-__kernel void compute_mean(
+__kernel void compute_mean_parallel(
     __global const float* tensor,
     __global float* mean,
     __local float* local_sum, // Shared memory for partial sums
@@ -109,6 +109,7 @@ __kernel void compute_mean(
 
     if (n < N && h < H && w < W) { // Ensure valid bounds
         partial_sum = tensor[idx];
+        // printf("Tensor[%d]: %f, Partial Sum: %f\n", idx, tensor[idx], partial_sum);
     }
 
     // Step 2: Write partial sums to local memory
@@ -124,10 +125,10 @@ __kernel void compute_mean(
         }
         barrier(CLK_LOCAL_MEM_FENCE);
     }
-
     // Step 4: Write the result of the reduction to the global mean array
     if (local_id == 0) { // One work-item per group writes the final sum
         float total_sum = local_sum[0];
+        // printf("Channel %d, Final Local Sum: %f\n", c, local_sum[0]);
 
         // Normalize by the total number of elements in the channel
         int channel_size = N * spatial_size;
@@ -135,7 +136,7 @@ __kernel void compute_mean(
     }
 }
 
-__kernel void compute_variance(
+__kernel void compute_variance_parallel(
     __global const float* tensor,
     __global const float* mean,
     __global float* variance,
@@ -183,6 +184,7 @@ __kernel void compute_variance(
         }
         barrier(CLK_LOCAL_MEM_FENCE);
     }
+    
 
     // Write the final result for the channel
     if (local_id == 0) {
@@ -194,4 +196,41 @@ __kernel void compute_variance(
     }
 }
 
+__kernel void compute_mean(
+    __global const float* tensor,
+    __global float* mean,
+    int N, int C, int H, int W) {
+    int c = get_global_id(0);
+    int spatial_size = H * W;
+    int channel_size = N * spatial_size;
 
+    float sum = 0.0f;
+    for (int n = 0; n < N; ++n) {
+        for (int hw = 0; hw < spatial_size; ++hw) {
+            int idx = n * C * spatial_size + c * spatial_size + hw;
+            sum += tensor[idx];
+        }
+    }
+    mean[c] = sum / (float)channel_size;
+}
+
+__kernel void compute_variance(
+    __global const float* tensor,
+    __global const float* mean,
+    __global float* variance,
+    int N, int C, int H, int W) {
+    int c = get_global_id(0);
+    int spatial_size = H * W;
+    int channel_size = N * spatial_size;
+
+    float mean_c = mean[c];
+    float sum = 0.0f;
+    for (int n = 0; n < N; ++n) {
+        for (int hw = 0; hw < spatial_size; ++hw) {
+            int idx = n * C * spatial_size + c * spatial_size + hw;
+            float diff = tensor[idx] - mean_c;
+            sum += diff * diff;
+        }
+    }
+    variance[c] = sum / (float)channel_size;
+}
