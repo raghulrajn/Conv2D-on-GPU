@@ -4,47 +4,75 @@
 #include <OpenCL/Device.hpp>
 #include <OpenCL/Event.hpp>
 #include <OpenCL/Program.hpp>
+#include <OpenCL/Error.hpp>
 #include <OpenCL/cl-patched.hpp>
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <chrono>
 #include <random>
+#include <fstream>
 
-void convolve4D(
-        const float* input,
-        const float* kernel,
-        float* output,
-        int batchSize,
-        int inChannels,
-        int outChannels,
-        int inHeight,
-        int inWidth,
+class GPUInit {
+
+	private:
+		cl::Context context;
+		cl::CommandQueue queue;
+		cl::Program program;
+		cl::Device device;
+		std::vector<cl::Device> devices;
+
+		cl::Kernel convKernel;
+		cl::Kernel meanKernel;
+		
+		// Timing events
+		cl::Event copyToDeviceEvent;
+		cl::Event kernelEvent;
+		cl::Event copyFromDeviceEvent;
+
+		std::string load_kernel_source(const std::string& filename) {
+			std::ifstream file(filename);
+			if (!file.is_open()) {
+				std::cerr << "Failed to open kernel source file." << std::endl;
+				exit(1);
+			}
+			return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+		}
+
+	public:
+	GPUInit(){
+		context = cl::Context(CL_DEVICE_TYPE_GPU);
+		device = context.getInfo<CL_CONTEXT_DEVICES>()[0];
+		devices.push_back(device);
+		
+		// Create a command queue
+		queue = cl::CommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE);
+
+		// Load the source code
+		extern unsigned char conv2d_cl[];
+		extern unsigned int conv2d_cl_len;
+		// std::string kernel_source = load_kernel_source("/home/raghul/Desktop/Conv2D-on-GPU/GPU/src/conv2d.cl");
+		// cl::Program program(context, kernel_source);
+		cl::Program program(context, std::string((const char*)conv2d_cl, conv2d_cl_len));
+		// Compile the source code. This is similar to program.build(devices) but will print more detailed error messages
+		OpenCL::buildProgram(program, devices);
+		std::cout << "Context has " << context.getInfo<CL_CONTEXT_DEVICES>().size()<< " devices" << std::endl;
+		OpenCL::printDeviceInfo(std::cout, device);
+		// cl::Kernel meanKernel(program, "compute_mean");
+		try {
+			meanKernel = cl::Kernel(program, "compute_mean");
+		} catch (OpenCL::Error &e) {
+			std::cerr << "Error creating kernel: " << e.what() << std::endl;
+			throw std::runtime_error("Failed to create kernel.");
+		}
+
+	}
+
+	void convolve4D(const float* input,const float* kernel,float* output,int batchSize,int inChannels,int outChannels,int inHeight,int inWidth,
         int kernelH,
         int kernelW,
         int stride = 1,
-        int padding = 0
-    ) {
-        auto startTotal = std::chrono::high_resolution_clock::now();
-        
-			 cl::Context context(CL_DEVICE_TYPE_GPU);
-			std::cout << "Context has " << context.getInfo<CL_CONTEXT_DEVICES>().size()
-            << " devices" << std::endl;
-			cl::Device device = context.getInfo<CL_CONTEXT_DEVICES>()[0];
-			std::vector<cl::Device> devices;
-			devices.push_back(device);
-			OpenCL::printDeviceInfo(std::cout, device);
-            
-            // Create a command queue
-			cl::CommandQueue queue(context, device, CL_QUEUE_PROFILING_ENABLE);
-
-			// Load the source code
-			extern unsigned char conv2d_cl[];
-			extern unsigned int conv2d_cl_len;
-			cl::Program program(context,
-								std::string((const char*)conv2d_cl,
-											conv2d_cl_len));
-			// Compile the source code. This is similar to program.build(devices) but will print more detailed error messages
-			OpenCL::buildProgram(program, devices);
+        int padding = 0) {
+        	auto startTotal = std::chrono::high_resolution_clock::now();
 			cl::Kernel convKernel(program, "conv2d");
             // Calculate output dimensions
             int outHeight = (inHeight + 2 * padding - kernelH) / stride + 1;
@@ -89,25 +117,55 @@ void convolve4D(
             cl::NDRange globalSize(outWidth, outHeight, outChannels);
             cl::NDRange localSize(16, 16, 1); // Adjust based on your GPU
             
-            queue.enqueueNDRangeKernel(convKernel, cl::NullRange, globalSize, 
-                                      localSize, nullptr, NULL);
-            
+            queue.enqueueNDRangeKernel(convKernel, cl::NullRange, globalSize, localSize, nullptr, NULL);
             auto endCompute = std::chrono::high_resolution_clock::now();
-            
             // Read back result
             auto startReadBack = std::chrono::high_resolution_clock::now();
-            queue.enqueueReadBuffer(d_output, CL_TRUE, 0, outputSize, output,
-                                  nullptr, NULL);
+            queue.enqueueReadBuffer(d_output, CL_TRUE, 0, outputSize, output,nullptr, NULL);
             auto endReadBack = std::chrono::high_resolution_clock::now();
             
-            
             } 
-    
-static std::vector<float> loadImageToTensor4D(const std::string& imagePath, 
-                                                 int targetWidth = -1, 
-                                                 int targetHeight = -1,
-                                                 bool normalize = true) {
-        // Read image
+
+	void computeMean(std::vector<float> input, std::vector<float> mean, int N, int C, int H, int W){
+
+		cl::NDRange globalSize(N, H, W);    // Global size
+		// cl::NDRange localSize(N / C, 1, 1); // Adjust local size for reduction
+
+		// Allocate local memory (size matches localSize[0])
+		size_t localMemSize = sizeof(float) * 256;
+
+		cl::Buffer tensor_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * input.size(), input.data());
+        cl::Buffer mean_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * mean.size(), mean.data());
+
+		// cl::NDRange globalSize(N, H, W); // Global size covers all spatial elements
+        cl::NDRange localSize(256);      // Adjust based on your device capabilities
+		// Set kernel arguments
+		
+		meanKernel.setArg(0, tensor_buffer);
+		meanKernel.setArg(1, mean_buffer);
+		meanKernel.setArg(2, cl::Local(localMemSize)); // Local memory
+		meanKernel.setArg(3, N);
+		meanKernel.setArg(4, C);
+		meanKernel.setArg(5, H);
+		meanKernel.setArg(6, W);
+
+		// Launch the kernel
+		queue.enqueueNDRangeKernel(meanKernel,cl::NDRange(),cl::NDRange(N,H,W),cl::NullRange);
+
+		queue.enqueueReadBuffer(mean_buffer, CL_TRUE, 0, sizeof(float) * mean.size(), mean.data());
+
+		 std::cout << "Mean for each channel:" << std::endl;
+        for (int c = 0; c < C; ++c) {
+            std::cout << "Channel " << c << ": " << mean[c] << std::endl;
+        }
+	}
+};
+
+
+
+// Read image 
+static std::vector<float> loadImageToTensor4D(const std::string& imagePath, int targetWidth = -1, int targetHeight = -1, bool normalize = true) {
+
         cv::Mat image = cv::imread(imagePath, cv::IMREAD_COLOR);
         if (image.empty()) {
             throw std::runtime_error("Failed to load image: " + imagePath);
@@ -170,43 +228,25 @@ static std::vector<float> loadKernelToTensor4D(){
 
 
 int main() {
-        // Example dimensions
-        int batchSize = 1;
-        int inChannels = 3;  // RGB image
-        int outChannels = 64;
-        int inHeight = 576;
-        int inWidth = 576;
-        int kernelH = 3;
-        int kernelW = 3;
-        int stride = 1;
-        int padding = 1;
+    GPUInit gpu = GPUInit();
+	std::cout<<"GPU Initialized\n";
+	int N = 1; // Number of batches
+    int C = 3; // Number of channels
+    int H = 3; // Height
+    int W = 3; // Width
+
+    // Example flattened 4D tensor with random values
+    std::vector<float> tensor = {
+        1, 2, 3, 4, 5, 6, 7, 8, 9, // Example data for demonstration
+        1, 2, 3, 4, 5, 6, 7, 8, 9,
+        1, 2, 3, 4, 5, 6, 7, 8, 9
+
+    };
+
+	std::vector<float>mean(C, 0.0f);
+
+	gpu.computeMean(tensor, mean, N, C, H, W);
+		
         
-        // Allocate memory for input, kernel, and output
-        std::vector<float> input(batchSize * inChannels * inHeight * inWidth);
-        std::vector<float> kernel(outChannels * inChannels * kernelH * kernelW);
-        
-        int outHeight = (inHeight + 2 * padding - kernelH) / stride + 1;
-        int outWidth = (inWidth + 2 * padding - kernelW) / stride + 1;
-        std::vector<float> output(batchSize * outChannels * outHeight * outWidth);
-        
-		input = loadImageToTensor4D("/home/raghul/Desktop/Conv2D-on-GPU/GPU/src/image.jpg");
-		kernel = loadKernelToTensor4D();
-        
-        // Perform convolution
-        convolve4D(
-            input.data(),
-            kernel.data(),
-            output.data(),
-            batchSize,
-            inChannels,
-            outChannels,
-            inHeight,
-            inWidth,
-            kernelH,
-            kernelW,
-            stride,
-            padding
-        );
-        
-        return 0;
-    } 
+    return 0;
+} 
