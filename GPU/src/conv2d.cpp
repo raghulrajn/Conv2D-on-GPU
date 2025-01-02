@@ -196,9 +196,9 @@ class GPUInit {
 	
 	void computeRelu(std::vector<float> input, int N, int C, int H, int W){
 		
-		cl::NDRange globalSize(N*H*W);    // Global size
+		cl::NDRange globalSize(N*C*H*W);    // Global size
 		
-		cl::Buffer tensor_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * input.size(), input.data());
+		cl::Buffer tensor_buffer(context, CL_MEM_READ_WRITE| CL_MEM_COPY_HOST_PTR, sizeof(float) * input.size(), input.data());
        
 		reluKernel.setArg(0, tensor_buffer);
 		reluKernel.setArg(1, N*C*H*W);
@@ -207,6 +207,10 @@ class GPUInit {
 		queue.enqueueNDRangeKernel(reluKernel,cl::NDRange(),globalSize,cl::NDRange());
 
 		queue.enqueueReadBuffer(tensor_buffer, CL_TRUE, 0, sizeof(float) * input.size(), input.data());
+		for (int c = 0; c < input.size(); ++c) {
+            std::cout<< input[c] <<" ";
+			
+        }
 	}
 };
 
@@ -297,10 +301,6 @@ int main() {
 
 	variance = gpu.computeVariance(tensor, mean,variance, N, C, H, W);
 	gpu.computeRelu(tensor,N,C,H,W);
-	for (int c = 0; c < tensor.size(); ++c) {
-            std::cout<< tensor[c] <<" ";
-			
-        }
         
     return 0;
 } 
