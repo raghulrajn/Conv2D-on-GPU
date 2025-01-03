@@ -25,7 +25,8 @@ class GPUInit {
 		cl::Kernel meanKernel;
 		cl::Kernel varianceKernel;
 		cl::Kernel reluKernel;
-		
+		cl::Kernel batchNormKernel;
+
 		// Timing events
 		cl::Event copyToDeviceEvent;
 		cl::Event kernelEvent;
@@ -64,6 +65,7 @@ class GPUInit {
 			meanKernel = cl::Kernel(program, "compute_mean");
 			varianceKernel = cl::Kernel(program, "compute_variance");
 			reluKernel = cl::Kernel(program, "compute_relu");
+			batchNormKernel = cl::Kernel(program, "compute_batch_norm");
 		} catch (OpenCL::Error &e) {
 			std::cerr << "Error creating kernel: " << e.what() << std::endl;
 			throw std::runtime_error("Failed to create kernel.");
@@ -194,7 +196,7 @@ class GPUInit {
 		return variance;
 	}
 	
-	void computeRelu(std::vector<float> input, int N, int C, int H, int W){
+	void computeRelu(std::vector<float> &input, int N, int C, int H, int W){
 		
 		cl::NDRange globalSize(N*C*H*W);    // Global size
 		
@@ -207,11 +209,51 @@ class GPUInit {
 		queue.enqueueNDRangeKernel(reluKernel,cl::NDRange(),globalSize,cl::NDRange());
 
 		queue.enqueueReadBuffer(tensor_buffer, CL_TRUE, 0, sizeof(float) * input.size(), input.data());
-		for (int c = 0; c < input.size(); ++c) {
-            std::cout<< input[c] <<" ";
-			
-        }
 	}
+
+	std::vector<float> computebatchNorm(std::vector<float> &input, int N, int C, int H, int W){
+
+		cl::NDRange globalSize(N, H, W);    // Global size
+		// cl::NDRange localSize(N, H, W); 
+
+		cl::Buffer tensor_buffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(float) * input.size(), input.data());
+        cl::Buffer mean_buffer(context, CL_MEM_READ_WRITE, sizeof(float) * C);
+		cl::Buffer variance_buffer(context, CL_MEM_READ_WRITE, sizeof(float) * C);
+
+		// Set kernel arguments		
+		meanKernel.setArg(0, tensor_buffer);
+		meanKernel.setArg(1, mean_buffer);
+		meanKernel.setArg(2, N);
+		meanKernel.setArg(3, C);
+		meanKernel.setArg(4, H);
+		meanKernel.setArg(5, W);
+
+		varianceKernel.setArg(0, tensor_buffer);
+		varianceKernel.setArg(1, mean_buffer);
+		varianceKernel.setArg(2, variance_buffer);
+		varianceKernel.setArg(3, N);
+		varianceKernel.setArg(4, C);
+		varianceKernel.setArg(5, H);
+		varianceKernel.setArg(6, W);
+
+		batchNormKernel.setArg(0, tensor_buffer);
+        batchNormKernel.setArg(1, mean_buffer);
+        batchNormKernel.setArg(2, variance_buffer);
+        batchNormKernel.setArg(3, N);
+        batchNormKernel.setArg(4, C);
+        batchNormKernel.setArg(5, H);
+        batchNormKernel.setArg(6, W);
+
+		// Launch the kernel
+		queue.enqueueNDRangeKernel(meanKernel,cl::NDRange(),cl::NDRange(C,1,1),cl::NDRange());
+		queue.enqueueNDRangeKernel(varianceKernel,cl::NDRange(),cl::NDRange(C,1,1),cl::NDRange());
+		queue.enqueueNDRangeKernel(batchNormKernel,cl::NDRange(),cl::NDRange(N*C*H*W),cl::NDRange());
+
+		queue.enqueueReadBuffer(tensor_buffer, CL_TRUE, 0, sizeof(float) * input.size(), input.data());
+
+		return input;
+	}
+
 };
 
 
@@ -279,6 +321,30 @@ static std::vector<float> loadKernelToTensor4D(){
 	return tensor;
 }
 
+void printFlattened4DTensor(const std::vector<float>& tensor, int N, int C, int H, int W) {
+    // The 4D tensor is flattened as a 1D array of size N*C*H*W
+    // To print as a matrix, we can print each slice of the tensor in a matrix format.
+
+    // Loop over the batches (N)
+    for (int n = 0; n < N; ++n) {
+        std::cout << "Batch " << n << ":\n";
+        
+        // Loop over the channels (C)
+        for (int c = 0; c < C; ++c) {
+            std::cout << " Channel " << c << ":\n";
+            
+            // Loop over the height (H)
+            for (int h = 0; h < H; ++h) {
+                // Loop over the width (W) and print the corresponding elements
+                for (int w = 0; w < W; ++w) {
+                    int idx = n * C * H * W + c * H * W + h * W + w; // Calculate the flattened index
+                    std::cout << tensor[idx] << " ";
+                }
+                std::cout << "\n";  // New line after each row of the matrix (height)
+            }
+        }
+    }
+}
 
 int main() {
     GPUInit gpu = GPUInit();
@@ -290,9 +356,9 @@ int main() {
 
     //flattened 4D tensor with random values
     std::vector<float> tensor = {
-        1, 2, -3, 4, 5, 6, 7, 8, 9, // Example data for demonstration
-        1, 2, 3, -4, 5, 6, 7, 8, 9,
-        1, 2, 3, 4, -5, 6, 7, 8, 9
+        1, 2, 3, 4, 5, 6, 7, 8, 9, // Example data for demonstration
+        1, 2, 3, 4, 5, 6, 7, 8, 9,
+        1, 2, 3, 4, 5, 6, 7, 8, 9
 
     };
 
@@ -301,6 +367,11 @@ int main() {
 
 	variance = gpu.computeVariance(tensor, mean,variance, N, C, H, W);
 	gpu.computeRelu(tensor,N,C,H,W);
-        
+
+	std::vector<float> bn = gpu.computebatchNorm(tensor, N, C,H,W);
+
+	printFlattened4DTensor(tensor, N,C,H,W);
+	printFlattened4DTensor(bn, N,C,H,W);
+
     return 0;
 } 

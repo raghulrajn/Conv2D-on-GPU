@@ -234,3 +234,22 @@ __kernel void compute_variance(
     }
     variance[c] = sum / (float)channel_size;
 }
+
+__kernel void compute_batch_norm(
+    __global float* tensor,
+    __global const float* mean,
+    __global const float* variance,
+    int N, int C, int H, int W) {
+
+    int idx = get_global_id(0); // Global thread ID
+    int total_size = N * C * H * W;
+
+    if (idx < total_size) {
+        int c = (idx / (H * W)) % C; // Channel ID
+        float mean_c = mean[c];
+        float variance_c = variance[c];
+
+        float epsilon = 1e-5f; // Small constant
+        tensor[idx] = (tensor[idx] - mean_c) / sqrt(variance_c + epsilon);
+    }
+}
